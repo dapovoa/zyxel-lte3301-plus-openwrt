@@ -5,8 +5,8 @@
 [![Target](https://img.shields.io/badge/target-ramips%2Fmt7621-blue)](https://openwrt.org/docs/techref/targets/ramips)
 [![Device](https://img.shields.io/badge/device-Zyxel%20LTE3301--PLUS-informational)](https://openwrt.org/toh/hwdata/zyxel/zyxel_lte3301-plus)
 
-An LTE CPE turned into a small store router: POS on the wired LAN, customers on an
-isolated Wi-Fi network, LTE as uplink, and a watchdog that brings the link back by itself.
+An LTE CPE turned into a small store router: admin on one cable port, POS on two others,
+customers on an isolated Wi-Fi network, LTE as uplink, and a watchdog that brings the link back by itself.
 Everything below was measured on the hardware — including the two mistakes that cost a
 night (a `/32` LAN and a wedged QMI client).
 
@@ -28,7 +28,13 @@ GPIO       power_modem = gpio 27 (exported as /sys/class/gpio/power_modem, ACTIV
 
 Ports, left to right on the case: `WAN/LAN1`, `LAN2`, `LAN3`, `LAN4`. In OpenWrt **all four
 are in `br-lan` by default** — there is no dedicated WAN port like the stock firmware
-(`dedicateEthWan`). This repo moves `lan4` out into its own WAN.
+(`dedicateEthWan`). This repo splits them:
+
+```
+WAN/LAN1   lan1   administration (despite the label — plug the admin PC here)
+LAN2-3     lan2   POS
+LAN4       lan4   optional wired uplink
+```
 
 ## Firmware
 
@@ -119,10 +125,11 @@ lan4      wan4  proto dhcp  metric 10         optional wired uplink  (e.g. a 5G 
 wwan0     wan   proto qmi   metric 20         LTE
 ```
 
-Firewall zones: `lan` (input ACCEPT), `wan` (input REJECT, masq), `loja`
+Firewall zones: `lan` (input ACCEPT), `wan` (input REJECT, masq), and `pos` / `loja`
 (input REJECT, forward REJECT, masq, forwarding only to `wan`, plus explicit rules for
-DHCP 67/udp and DNS 53/tcp+udp — without those the customer network has no lease and no
-resolver). Admin access from the Wi-Fi is impossible by zone, not by a port rule.
+DHCP 67/udp and DNS 53/tcp+udp — without those there is no lease and no resolver).
+SSH and LuCI listen only on `192.168.3.1`, so admin access from POS or Wi-Fi is blocked
+by zone and by bind, not by a port rule.
 
 ## Wi-Fi
 
@@ -187,17 +194,14 @@ upload           7.8 Mbps                               15-19 Mbps
 ping             43 ms avg, 158 ms max                  36 ms avg
 ```
 
-> An earlier version of this repo said "never set an MTU on the modem — it hangs the
-> Quectel". That did not reproduce on this firmware: `mtu 1400` is fine. If a different
-> modem firmware does hang, fall back to `mtu_fix 1` alone (MSS clamping without the MTU).
+If a different modem firmware hangs with `mtu` set, fall back to `mtu_fix 1` alone.
 
-## Watchdog (this box, not the Orbi one)
+## Watchdog
 
 `scripts/wan-up.sh`, called every minute by cron and once from a net hotplug when `wwan0`
 appears. Locked with `/tmp/wan-up.lock`, logs state transitions to `/root/wan.log`. It does
 nothing during the first 150 s of uptime: with `auto 1`, netifd is still bringing QMI up
-then, and a `killall uqmi` in the middle of that is pitfall 2 below (seen once on a cold
-boot before the guard: "rede em baixo" → "recuperado: ifup" 26 s later).
+then, and a `killall uqmi` in the middle of that is pitfall 2 below.
 
 ```
 ping -I wwan0 1.1.1.1 ok?               -> exit
@@ -206,9 +210,8 @@ not registered?                          -> leave it alone (SIM/coverage), retry
 registered but no data?                  -> AT+CFUN=1,1 on /dev/ttyUSB2, wait 60 s, sync, ifup
 ```
 
-No GPIO poking, no `modem_switch` — those are Netgear LBR20 mechanisms and do not exist
-here. The stock LTE3301 modem power GPIO (`power_modem`) is raised once by `/etc/rc.local`
-because OpenWrt leaves it at 0 at boot; without that the modem never enumerates.
+The modem power GPIO (`power_modem`) is raised once by `/etc/rc.local`: OpenWrt leaves it
+at 0 at boot, and without it the modem never enumerates.
 
 Measured: a deliberate `ifdown wan` recovered in ~70 s; a cold boot reaches SSH in 61 s and
 LTE with an IPv4 address in **97 s**, unattended.
@@ -226,36 +229,18 @@ ping       ~36 ms
 CPU        91% idle during the download (MT7621 is not the bottleneck)
 ```
 
-Same box, same place, two operators (2026-11-04, *before* the APN/MTU fix):
-
-| | DIGI (268-02) | WOO/NOS (268-03) |
-|---|---|---|
-| carriers | B7 10 MHz + B3 10 MHz | B7 **20 MHz** + B3 **20 MHz** |
-| CA | **activated** | "deactivated" (single carrier) |
-| down | **62-67 Mbps**, stable (83-92 after the fix) | 11-48 Mbps, erratic |
-| up | 8-13 Mbps (15-19 after the fix) | **16.5 Mbps** |
-| ping | 28-45 ms | 21-**152** ms (jitter) |
-| APN | empty worked; `internet` is the official one | `umts` — the SIM does not provide it |
-| PDP MTU | 1400 | 1456 |
-
-DIGI wins here for a store: audio-to-speakers is downlink and jitter-sensitive. The modem is
+DIGI was chosen over WOO/NOS (same box, same place): carrier aggregation active, stable
+download, low jitter — audio-to-speakers is downlink and jitter-sensitive. Full comparison
+in NOTES-pt.md. The modem is
 Cat 6 (2 DL carriers max, 1 UL carrier) and the local cell offers B3 + B7 at 10 MHz each:
 ≈150 Mbps PHY peak down (2x2, 64QAM) and ≈50 up; 83-92 / 15-19 of real TCP on a shared cell
 is the practical ceiling. More needs wider carriers from the operator or a 5G CPE — radio,
 not configuration. Band locking does not help: the neighbour cells are weaker.
 
-## Tuning and cleanup (2026-11-05)
+## IRQ affinity
 
-- **IRQ affinity.** Every IRQ (ethernet, USB/xhci = the modem, mt7615e) was on CPU0.
-  `scripts/irq-spread.sh` (run from `rc.local`) pins ethernet → CPU0, xhci → CPU1,
-  Wi-Fi → CPU2. No change in LTE numbers (the radio is the limit); it keeps CPU0 free when
-  LTE and Wi-Fi are both busy. `packet_steering 1` (RPS) stays on.
-- **Removed:** wan→lan `Allow-IPSec-ESP`, `Allow-ISAKMP`, `Allow-IGMP` (CGNAT, unused);
-  `dhcp.lan` DHCPv6/RA server options (odhcpd is not installed, IPv6 is off); the
-  `firewall.user` include.
-- **Kept on purpose:** the watchdog cron, the `power_modem` line in `rc.local` (the GPIO
-  exists and is needed), `wpa_supplicant` (comes with `wpad`, ~3 MB, not worth the risk).
-  RAM in use: ~44 of 248 MB.
+`scripts/irq-spread.sh` (from `rc.local`) pins ethernet → CPU0, xhci (modem) → CPU1,
+Wi-Fi → CPU2; by default all were on CPU0. `packet_steering 1` stays on.
 
 ## Pitfalls that cost real time
 
@@ -298,6 +283,8 @@ scripts/30-wwan-ifup         hotplug: modem appeared
 scripts/41-ap-isolate        hotplug: bridge port isolation for the AP ports
 scripts/irq-spread.sh        IRQ affinity (ethernet/modem/Wi-Fi on separate CPUs)
 scripts/wifi-log.sh          per-client band/signal/bitrate log (cron, /tmp)
+scripts/siglog.sh            LTE signal sampler (siglog.sh <samples> <seconds>)
+scripts/uq                   uqmi with a 12 s timeout (a hung uqmi does not freeze SSH)
 scripts/install-router.sh    push all of the above and apply uci + cron, idempotent
                              (WIFI_KEY=... APN=internet PDP_MTU=1400 ./install-router.sh)
 firmware/sha256sums          image hashes (binaries are git-ignored)
