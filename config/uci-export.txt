@@ -51,8 +51,6 @@ config device
 	option name 'br-lan'
 	option type 'bridge'
 	list ports 'lan1'
-	list ports 'lan2'
-	list ports 'lan3'
 
 config interface 'lan'
 	option device 'br-lan'
@@ -87,6 +85,18 @@ config interface 'wan4'
 	option metric '10'
 	option peerdns '0'
 	option dns '1.1.1.1 1.0.0.1'
+
+config device 'pos_dev'
+	option name 'br-pos'
+	option type 'bridge'
+	list ports 'lan2'
+	list ports 'lan3'
+
+config interface 'pos'
+	option device 'br-pos'
+	option proto 'static'
+	option ipaddr '192.168.5.1'
+	option netmask '255.255.255.0'
 
 ##### wireless
 package wireless
@@ -188,6 +198,12 @@ config dhcp 'loja'
 	option start '100'
 	option limit '100'
 	option leasetime '2h'
+
+config dhcp 'pos'
+	option interface 'pos'
+	option start '100'
+	option limit '50'
+	option leasetime '12h'
 
 ##### firewall
 package firewall
@@ -320,24 +336,43 @@ config rule
 	option dest_port '53'
 	option target 'ACCEPT'
 
+config zone 'pos'
+	option name 'pos'
+	option network 'pos'
+	option input 'REJECT'
+	option output 'ACCEPT'
+	option forward 'REJECT'
+
+config forwarding 'pos_fwd'
+	option src 'pos'
+	option dest 'wan'
+
+config rule 'pos_dhcp'
+	option name 'pos-dhcp'
+	option src 'pos'
+	option proto 'udp'
+	option dest_port '67'
+	option target 'ACCEPT'
+
+config rule 'pos_dns'
+	option name 'pos-dns'
+	option src 'pos'
+	option proto 'tcp udp'
+	option dest_port '53'
+	option target 'ACCEPT'
+
 ##### dropbear
 package dropbear
 
 config dropbear 'main'
 	option PasswordAuth 'off'
 	option Port '22'
-	option _direct '1'
-	option DirectInterface 'lan'
-	option Interface 'br-lan'
+	option Interface 'lan'
 
 ##### uhttpd
 package uhttpd
 
 config uhttpd 'main'
-	list listen_http '0.0.0.0:80'
-	list listen_http '[::]:80'
-	list listen_https '0.0.0.0:443'
-	list listen_https '[::]:443'
 	option redirect_https '0'
 	option home '/www'
 	option rfc1918_filter '1'
@@ -352,6 +387,8 @@ config uhttpd 'main'
 	option http_keepalive '20'
 	option tcp_keepalive '1'
 	option ubus_prefix '/ubus'
+	list listen_http '192.168.3.1:80'
+	list listen_https '192.168.3.1:443'
 
 config cert 'defaults'
 	option days '397'
@@ -404,4 +441,5 @@ config internal 'diag'
 	option dns 'openwrt.org'
 	option ping 'openwrt.org'
 	option route 'openwrt.org'
+
 

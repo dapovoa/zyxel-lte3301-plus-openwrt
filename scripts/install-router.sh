@@ -38,11 +38,19 @@ $SCP "$SRC_DIR/scripts/30-wwan-ifup" "$SRC_DIR/scripts/41-ap-isolate" \
 	"root@$ROUTER:/etc/hotplug.d/net/"
 run 'chmod +x /usr/bin/wan-up.sh /usr/bin/uq /usr/bin/siglog.sh /usr/bin/irq-spread.sh /usr/bin/wifi-log.sh /etc/hotplug.d/net/30-wwan-ifup /etc/hotplug.d/net/41-ap-isolate'
 
-say "2/7 rede: lan /24 e rede loja (Wi-Fi isolada)"
+say "2/7 rede: lan1 admin, lan2/lan3 pos, rede loja (Wi-Fi isolada)"
 run 'uci set network.lan.device="br-lan"; uci set network.lan.proto="static"
 uci set network.lan.ipaddr="192.168.3.1"; uci set network.lan.netmask="255.255.255.0"
 uci delete network.lan.ip6assign 2>/dev/null
 uci delete network.globals.ula_prefix 2>/dev/null
+d=$(uci show network | grep "name=.br-lan." | cut -d. -f2)
+uci -q delete network.$d.ports || true; uci add_list network.$d.ports="lan1"
+uci -q delete network.pos_dev || true
+uci set network.pos_dev=device; uci set network.pos_dev.name="br-pos"; uci set network.pos_dev.type="bridge"
+uci add_list network.pos_dev.ports="lan2"; uci add_list network.pos_dev.ports="lan3"
+uci -q delete network.pos || true
+uci set network.pos=interface; uci set network.pos.device="br-pos"; uci set network.pos.proto="static"
+uci set network.pos.ipaddr="192.168.5.1"; uci set network.pos.netmask="255.255.255.0"
 uci -q delete network.loja || true
 uci show network | grep -q "name=.br-loja." || { uci add network device; uci set network.@device[-1].name="br-loja"; uci set network.@device[-1].type="bridge"; }
 uci set network.loja=interface; uci set network.loja.device="br-loja"
@@ -64,6 +72,8 @@ uci commit network'
 say "3/7 dhcp + zonas de firewall + MSS"
 run 'uci set dhcp.loja=dhcp; uci set dhcp.loja.interface="loja"
 uci set dhcp.loja.start="100"; uci set dhcp.loja.limit="100"; uci set dhcp.loja.leasetime="2h"
+uci set dhcp.pos=dhcp; uci set dhcp.pos.interface="pos"
+uci set dhcp.pos.start="100"; uci set dhcp.pos.limit="50"; uci set dhcp.pos.leasetime="12h"
 for o in dhcpv6 ra ra_slaac ra_flags; do uci -q delete dhcp.lan.$o; done
 uci commit dhcp
 uci -q delete firewall.loja || true
@@ -88,6 +98,19 @@ uci -q delete firewall.loja_dns || true
 uci set firewall.loja_dns=rule; uci set firewall.loja_dns.name="loja-dns"
 uci set firewall.loja_dns.src="loja"; uci set firewall.loja_dns.proto="tcp udp"
 uci set firewall.loja_dns.dest_port="53"; uci set firewall.loja_dns.target="ACCEPT"
+for z in pos; do
+  uci -q delete firewall.$z || true
+  uci set firewall.$z=zone; uci set firewall.$z.name="$z"; uci set firewall.$z.network="$z"
+  uci set firewall.$z.input="REJECT"; uci set firewall.$z.output="ACCEPT"; uci set firewall.$z.forward="REJECT"
+  uci -q delete firewall.${z}_fwd || true
+  uci set firewall.${z}_fwd=forwarding; uci set firewall.${z}_fwd.src="$z"; uci set firewall.${z}_fwd.dest="wan"
+  uci -q delete firewall.${z}_dhcp || true
+  uci set firewall.${z}_dhcp=rule; uci set firewall.${z}_dhcp.name="$z-dhcp"; uci set firewall.${z}_dhcp.src="$z"
+  uci set firewall.${z}_dhcp.proto="udp"; uci set firewall.${z}_dhcp.dest_port="67"; uci set firewall.${z}_dhcp.target="ACCEPT"
+  uci -q delete firewall.${z}_dns || true
+  uci set firewall.${z}_dns=rule; uci set firewall.${z}_dns.name="$z-dns"; uci set firewall.${z}_dns.src="$z"
+  uci set firewall.${z}_dns.proto="tcp udp"; uci set firewall.${z}_dns.dest_port="53"; uci set firewall.${z}_dns.target="ACCEPT"
+done
 uci commit firewall
 fw4 check && fw4 reload'
 
@@ -110,10 +133,14 @@ for i in 0 1; do
 done
 uci commit wireless; wifi reload; /etc/hotplug.d/net/41-ap-isolate'
 
-say "5/7 admin so pelo cabo"
+say "5/7 admin so pelo cabo na lan1 (SSH e LuCI so em 192.168.3.1)"
 run 'uci set dropbear.main.PasswordAuth="off"
-uci set dropbear.main.Interface="br-lan"
-uci commit dropbear; /etc/init.d/dropbear restart'
+uci set dropbear.main.Interface="lan"
+uci -q delete dropbear.main.DirectInterface || true; uci -q delete dropbear.main._direct || true
+uci commit dropbear; /etc/init.d/dropbear restart
+uci -q delete uhttpd.main.listen_http || true; uci -q delete uhttpd.main.listen_https || true
+uci add_list uhttpd.main.listen_http="192.168.3.1:80"; uci add_list uhttpd.main.listen_https="192.168.3.1:443"
+uci commit uhttpd; /etc/init.d/uhttpd restart'
 
 say "6/7 watchdog + backup do overlay"
 run 'grep -q power_modem /etc/rc.local || sed -i "/^exit 0/i echo 1 > /sys/class/gpio/power_modem/value 2>/dev/null" /etc/rc.local
@@ -130,6 +157,7 @@ grep -q /etc/hotplug.d/net /etc/sysupgrade.conf || echo "/etc/hotplug.d/net/" >>
 
 say "7/7 verificar"
 $SSH 'echo "lan:    $(ip -4 addr show br-lan | grep -oE "inet [0-9./]+")"
+echo "pos:    $(ip -4 addr show br-pos | grep -oE "inet [0-9./]+")"
 echo "loja:   $(ip -4 addr show br-loja | grep -oE "inet [0-9./]+")"
 echo "wifi:   $(iwinfo 2>/dev/null | grep -oE "ESSID: \"[^\"]*\"" | sort -u | tr "\n" " ")"
 echo "wan:    $(ip -4 addr show wwan0 2>/dev/null | grep -oE "inet [0-9./]+" || echo pendente) apn=$(uci -q get network.wan.apn) mtu=$(uci -q get network.wan.mtu)"

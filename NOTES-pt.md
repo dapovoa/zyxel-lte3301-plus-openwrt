@@ -126,7 +126,8 @@ outro rádio, não configuração.
 ## Desenho final (loja)
 
 ```
-br-lan    lan1 lan2 lan3    192.168.3.1/24    POS + administração
+br-lan    lan1              192.168.3.1/24    administração (SSH + LuCI)
+br-pos    lan2 lan3         192.168.5.1/24    POS, só internet
 br-loja   phy0-ap0 phy1-ap0 192.168.4.1/24    clientes, isolados
 lan4      wan4 dhcp metric 10                 uplink ethernet opcional (ex. CPE 5G)
 wwan0     wan qmi   metric 20                 LTE
@@ -140,7 +141,9 @@ wwan0     wan qmi   metric 20                 LTE
   59/13,5 Mbps e **`192.168.3.1` está bloqueado**.
 - Zona `loja`: input REJECT, forward REJECT, masq, forwarding só para `wan`, e regras
   explícitas para DHCP (67/udp) e DNS (53) — sem elas não há lease nem resolução.
-- Admin só pelo cabo: `dropbear` com `PasswordAuth off` e `Interface br-lan` (chave ed25519).
+- Zona `pos` (lan2/lan3): igual à `loja` — só DHCP, DNS e saída para `wan`; não chega ao router.
+- Admin só pelo cabo na `lan1`: `dropbear` com `PasswordAuth off` e `Interface lan` (chave ed25519),
+  `uhttpd` só em `192.168.3.1:80/443`. Verificado com `netstat`: 22/80/443 só em `192.168.3.1`.
 
 ## Watchdog
 

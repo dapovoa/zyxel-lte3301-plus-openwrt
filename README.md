@@ -112,7 +112,8 @@ OEM web UI, then UBI preparation, then `sysupgrade`.
 ## Network design
 
 ```
-br-lan    lan1 lan2 lan3    192.168.3.1/24    POS + administration   (LuCI + SSH only here)
+br-lan    lan1              192.168.3.1/24    administration         (LuCI + SSH only here)
+br-pos    lan2 lan3         192.168.5.1/24    POS                    (internet only, no router access)
 br-loja   phy0-ap0 phy1-ap0 192.168.4.1/24    Wi-Fi customers        (isolated)
 lan4      wan4  proto dhcp  metric 10         optional wired uplink  (e.g. a 5G CPE)
 wwan0     wan   proto qmi   metric 20         LTE
