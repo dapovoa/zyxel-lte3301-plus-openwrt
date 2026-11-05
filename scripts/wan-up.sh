@@ -1,9 +1,9 @@
 #!/bin/sh
-# manter o LTE de pe - idempotente, com travões (nada de GPIO do LBR20)
 LOG=/root/wan.log
 LOCK=/tmp/wan-up.lock
 say() { echo "$(date "+%F %T") $*" >> "$LOG"; }
 [ -e "$LOCK" ] && exit 0
+[ "$(cut -d. -f1 /proc/uptime)" -lt 150 ] && exit 0
 : > "$LOCK"
 trap "rm -f $LOCK" EXIT INT TERM
 

@@ -1,5 +1,4 @@
 #!/bin/sh
-# registo de sinal LTE: "$1" amostras, "$2" segundos entre elas
 n=${1:-5}; d=${2:-6}; i=0
 while [ $i -lt $n ]; do
   s=$(/usr/bin/uq -d /dev/cdc-wdm0 --get-signal-info 2>/dev/null | tr -d "\n\t ")

@@ -90,12 +90,16 @@ inline). Ao mudar a LAN por UCI, escrever sempre a máscara.
   Power-cycling SIM` → `Failed to connect to service`. A escada que resolve é
   `killall uqmi` + `--sync` + `ifup` em background; e `AT+CFUN=1,1` só quando está
   registado e sem dados. Nunca na sessão interactiva (perde-se o SSH).
-- `pdptype='ipv4'` (o `ipv4v6` pendura estes Quectel, como no LBR20) e **MTU nunca**.
+- `pdptype='ipv4'` (o `ipv4v6` pendura estes Quectel, como no LBR20).
+- ~~MTU nunca~~ — **corrigido a 2026-11-05**: `mtu='1400'` (= MTU do PDP da DIGI) funciona
+  neste firmware (EG06ELAR03A07M4G), sobrevive a `ifdown/ifup` e a arranque a frio, e com
+  `mtu_fix 1` dobrou o upload. Ver secção de 2026-11-05.
 - APN: o perfil do SIM vem vazio e o OpenWrt espera que a rede o atribua. A DIGI atribui
-  (funciona com `apn=''`); a NOS/WOO não — precisa de `apn='umts'`. Não é avaria, é
-  diferença de software face a um CPE de marca (que traz base de dados de APNs).
+  (funciona com `apn=''`), mas o APN oficial é `internet` e é o que fica configurado; a
+  NOS/WOO não atribui — precisa de `apn='umts'`. Não é avaria, é diferença de software face
+  a um CPE de marca (que traz base de dados de APNs).
 
-## Comparação de operadores no mesmo sítio (trocando só o cartão)
+## Comparação de operadores no mesmo sítio (trocando só o cartão, 2026-11-04, antes da correcção de APN/MTU)
 
 ```
                     DIGI (268-02)                    WOO/NOS (268-03)
@@ -113,9 +117,11 @@ Escolha para loja: **DIGI**. O critério não é só débito: áudio para coluna
 sofre com 150 ms de jitter. A WOO tem uplink melhor e mais espectro por portadora, mas não
 agrega — logo metade.
 
-O tecto do aparelho: EG06-E é **Cat 6 (2 portadoras)** e a rede local só oferece aquelas
-duas. 20 MHz agregados dão ~90-100 Mbps de PHY; 62-67 de TCP é ~70%, coerente com
-RSRP -94 e SINR 11-19. Para 120/23 é preciso 5G — outro rádio, não configuração.
+O tecto do aparelho: EG06-E é **Cat 6 (2 portadoras no download, 1 no upload)** e a rede
+local só oferece aquelas duas, de 10 MHz cada. 10+10 MHz em 2x2/64QAM dão ≈150 Mbps de PHY
+no download e ≈50 no upload; numa célula partilhada, os 83-92 / 15-19 medidos depois da
+correcção são o tecto prático. Mais só com portadoras mais largas da operadora ou 5G —
+outro rádio, não configuração.
 
 ## Desenho final (loja)
 
@@ -148,8 +154,8 @@ Medições:
 
 ```
 ifdown wan propositado      recuperou em ~70 s (log "inicio: rede em baixo")
-cold boot -> SSH            72 s
-cold boot -> LTE com IPv4   104 s, sem intervenção
+cold boot -> SSH            72 s   (61 s a 2026-11-05)
+cold boot -> LTE com IPv4   104 s, sem intervenção   (97 s a 2026-11-05, com auto=1)
 ```
 
 ## Limpeza e afinações
@@ -157,26 +163,69 @@ cold boot -> LTE com IPv4   104 s, sem intervenção
 Removidos 10 pacotes (171 → 161): `luci-app-attendedsysupgrade`, `owut`, `ppp`,
 `ppp-mod-pppoe`, `kmod-ppp/pppoe/pppox/slhc`, `odhcpd-ipv6only`, `odhcp6c`.
 IPv6 fora (`ip6assign` e `ula_prefix` removidos, odhcpd parado) — o PDP é IPv4.
-LEDs todos em `none`. `/etc/sysupgrade.conf` passou a incluir `wan-up.sh`, hotplug,
+LEDs todos em `none`, excepto `internet` (netdev `wwan0`, link/tx/rx). `/etc/sysupgrade.conf` passou a incluir `wan-up.sh`, hotplug,
 `firewall.user` e crontab (o backup passou de 44 para 42 ficheiros com os scripts dentro).
 
 `flow_offloading` + `flow_offloading_hw` ligados (flowtable com `flags offload`); a 67 Mbps
 o MT7621 fica nos 6% de CPU, portanto o offload não é o factor — fica ligado porque o
 `lan4` pode um dia levar um 5G ao lado.
 
+## 2026-11-05 — APN, MTU, IRQs e teste de bandas
+
+Ponto de partida: 84-91 Mbps down, **7,8 up**, ping 43 ms (máx. 158). Sinal bom
+(RSRP -88, SINR 22,8), CA B3+B7 10+10 MHz activa, CPU 91% livre.
+
+Diagnóstico: o PDP anuncia MTU 1400, mas o `wwan0` estava a 1500 com `mtu_fix 0`;
+APN vazio; `wan.auto 0` (o LTE só subia pelo hotplug, 40 s depois).
+
+```
+network.wan.apn       internet
+network.wan.mtu       1400
+network.wan.auto      1
+firewall zone wan     mtu_fix 1        (MSS 1360 = rt mtu - 40, nas duas direcções)
+/etc/firewall.user    removido         (as regras maxseg 1360 duplicavam o mtu_fix)
+```
+
+Resultado: **83-92 / 15-19 Mbps**, ping ~36 ms. Arranque a frio: SSH 61 s, LTE 97 s.
+
+O watchdog disparou no primeiro minuto após o arranque, com o netifd ainda a ligar o QMI
+(`killall uqmi` a meio = armadilha do QMI pendurado). Recuperou em 26 s, mas passou a ter
+uma guarda: não faz nada com `uptime < 150 s`.
+
+Afinação e limpeza:
+
+- IRQs: estavam todos no CPU0. `irq-spread.sh` (pelo `rc.local`): ethernet CPU0,
+  xhci/modem CPU1, mt7615e CPU2. Os números do LTE não mudam (o limite é o rádio).
+- Removidas regras wan→lan de IPSec/ISAKMP e IGMP (CGNAT, sem uso) e as opções de
+  servidor DHCPv6/RA da `lan` (sem odhcpd, sem efeito).
+- `802.11v` (`bss_transition`, `wnm_sleep_mode`) **outra vez testado e outra vez a deitar
+  abaixo os dois rádios** com `wpad-basic-mbedtls` — revertido. Confirma a nota acima.
+
+Teste A/B das bandas (mesmo telemóvel, mesmo sítio, speed.cloudflare.com):
+
+```
+A   2,4 + 5 GHz, mesmo SSID   82,5 / 17,8   cliente em 5 GHz, -30 dBm, 866,7 Mbit/s
+B   só 5 GHz (radio0 off)     89,5 / 18,8   cliente em 5 GHz, -28 dBm, 866,7
+A2  2,4 + 5 GHz, mesmo SSID   92,1 / 18,1   cliente em 5 GHz, -29 dBm, 866,7
+```
+
+Ter as duas bandas no mesmo SSID **não** custa débito: o MT7615E é DBDC (um rádio e
+antenas por banda), e a variação é do LTE. Ocultar/desligar uma banda não ganha nada e
+perde o alcance dos 2,4 GHz. O que custaria débito seria um cliente preso nos 2,4 GHz
+(HT20 ≈ 40-70 Mbps reais) — para isso há agora o `wifi-log.sh` (cron, a cada minuto,
+`/tmp/wifi-clients.log`). Se lá aparecerem clientes em 2,4 GHz com bom sinal, a resposta é
+`wpad-mbedtls` + `usteer`, não esconder SSIDs.
+
 ## Comandos úteis
 
 ```sh
-# estado do LTE sem pendurar (não há `timeout` no busybox deste build)
 /usr/bin/uq -d /dev/cdc-wdm0 --get-signal-info
-/usr/bin/uq -d /dev/cdc-wdm0 --get-lte-cphy-ca-info     # portadoras e CA
-/usr/bin/uq -d /dev/cdc-wdm0 --get-current-settings     # IP, DNS, MTU do PDP
+/usr/bin/uq -d /dev/cdc-wdm0 --get-lte-cphy-ca-info
+/usr/bin/uq -d /dev/cdc-wdm0 --get-current-settings
 
-# AT directo (o porto ecoa ruído, ler num ficheiro)
 ( cat /dev/ttyUSB2 > /tmp/at.out & echo $! > /tmp/p ); sleep 1
 printf 'AT+QENG="servingcell"\r' > /dev/ttyUSB2; sleep 3; kill $(cat /tmp/p)
 cat /tmp/at.out
 
-# signal log (para comparar antenas/posição)
-/usr/bin/siglog.sh 6 5     # 6 amostras com 5 s
+/usr/bin/siglog.sh 6 5
 ```

@@ -1,0 +1,12 @@
+{
+  "hooks": {
+    "beforeShellExecution": [
+      {
+        "command": ".cursor/hooks/pi-block.sh",
+        "timeout": 5,
+        "matcher": "git\\s+push|git\\s+commit|git\\s+reset\\s+--hard|git\\s+clean|git\\s+checkout\\s+--\\s+\\.|git\\s+restore\\s+\\.|git\\s+branch\\s+-D|git\\s+stash\\s+(?:drop|clear)|rm\\s+(?:-[a-zA-Z]*[rf]+[a-zA-Z]*\\s+|-[rf]+\\s).*|rm\\s+-rf?|rm\\s+-fr|sudo|chmod\\s+.*777|chown|:\\(\\)\\s*\\{\\s*:\\|:\\s*&\\s*\\}\\s*;:|>\\s*\\/dev\\/sd[a-z]|dd\\s+if=|curl.+\\|\\s*(?:ba)?sh|wget.+\\|\\s*(?:ba)?sh|mkfs\\.|fdisk|(shutdown|reboot|poweroff|halt)"
+      }
+    ]
+  },
+  "version": 1
+}

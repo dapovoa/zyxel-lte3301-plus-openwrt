@@ -16,7 +16,7 @@ night (a `/32` LAN and a wedged QMI client).
 SoC        MediaTek MT7621AT (2 cores + HT = 4 threads, 880 MHz)
 RAM        256 MB
 Flash      128 MB NAND (MX30LF1G18AC), UBI on mtd6 ("ubi", 0x03ee0000)
-Wi-Fi      MediaTek MT7615E (mt76), 2.4 + 5 GHz, 2x2
+Wi-Fi      MediaTek MT7615E (mt76), DBDC: one chip, two radios (2.4 + 5 GHz), 2x2 each
 Ethernet   4x Gigabit (lan1..lan4, DSA switch)
 LTE        Quectel EG06-E (Cat 6) on USB3 — reports "Quectel EG06, EG06ELAR03A07M4G"
 SIM        1x micro-SIM
@@ -95,14 +95,15 @@ OEM web UI, then UBI preparation, then `sysupgrade`.
 
    Expect a few bad blocks (this unit: 125, 137, 147, 260 — normal).
 
-5. **Push the sysupgrade image and flash it.** Outbound HTTP from the router gives `EPERM`
-   on this build, so `wget` is useless — pipe the file over SSH instead:
+5. **Push the sysupgrade image and flash it.** Outbound HTTP from the initramfs gave `EPERM`
+   here, so `wget` was useless at this step — pipe the file over SSH instead (the installed
+   25.12.6 system downloads normally):
 
    ```sh
    cat openwrt-25.12.6-...-squashfs-sysupgrade.bin \
      | ssh root@192.168.1.1 'cat > /tmp/sysupgrade.bin; sha256sum /tmp/sysupgrade.bin'
-   ssh root@192.168.1.1 'sysupgrade -T /tmp/sysupgrade.bin'   # rc=0
-   ssh root@192.168.1.1 'sysupgrade -n /tmp/sysupgrade.bin'   # "Commencing upgrade", rc=246 is the SSH drop
+   ssh root@192.168.1.1 'sysupgrade -T /tmp/sysupgrade.bin'
+   ssh root@192.168.1.1 'sysupgrade -n /tmp/sysupgrade.bin'
    ```
 
    Port 22 comes back ~80 s later, running 25.12.6 from squashfs with the overlay on
@@ -141,29 +142,61 @@ Client-to-client isolation needs **two layers**:
 
 This `hostapd` build has **no WNM**: `bss_transition=1` makes hostapd refuse to start
 ("unknown configuration item") and both radios end up on channel 0 / 0 dBm. Do not use it.
-Band steering is therefore "best effort" via 802.11k only — with one SSID on both bands the
-client stays on a single network name; turning one radio off simply leaves the SSID on the
-other.
+Band steering is therefore left to the client (802.11k only). Real steering would need
+`wpad-mbedtls` (full) + `usteer`; not installed, because it was not needed:
 
-## MTU / MSS — never set an MTU on the modem
-
-The PDP MTU is **1400** with DIGI and **1456** with NOS/WOO. Setting `network.wan.mtu`
-hangs or kills this Quectel (a documented trap for EG06/EG18 in QMI). So:
+**Mixed bands do not cost throughput — measured.** The MT7615E is DBDC: each band has its
+own radio and antennas, so the 2.4 GHz radio does not take airtime from 5 GHz. A/B on the
+same phone, same spot (Cloudflare speed test, Mbps down/up):
 
 ```
-network.wan          no mtu option at all        (wwan0 stays at 1500)
-firewall zone wan    mtu_fix 0
-firewall zone loja   mtu_fix 0
-/etc/firewall.user   maxseg 1360 on wwan0, both directions
+A   2.4 + 5 GHz, same SSID   82.5 / 17.8    client on 5 GHz, -30 dBm, VHT-MCS9 2x2 866.7
+B   5 GHz only (radio0 off)  89.5 / 18.8    client on 5 GHz, -28 dBm, 866.7
+A2  2.4 + 5 GHz, same SSID   92.1 / 18.1    client on 5 GHz, -29 dBm, 866.7
 ```
 
-`1360 = 1400 - 20 (IP) - 20 (TCP)`, so it fits both operators. Unlike the Huawei CPE, none
-of this needs a reboot: `fw4 reload` applies it live.
+The spread is LTE variance (82-92 Mbps measured on the router itself), not Wi-Fi. Hiding or
+disabling a band gains nothing and loses the 2.4 GHz range. What *does* cost speed is a
+client sitting on 2.4 GHz (HT20 ≈ 40-70 Mbps real, below the LTE). `scripts/wifi-log.sh`
+(cron, every minute) records band / signal / bitrate per client in `/tmp/wifi-clients.log`
+to catch exactly that.
+
+## APN, MTU and MSS
+
+The PDP MTU is **1400** with DIGI and **1456** with NOS/WOO (`uqmi --get-current-settings`).
+With `wwan0` left at 1500 and `mtu_fix 0`, full-size packets do not fit the bearer, and upload
+suffers. Validated config (DIGI, EG06ELAR03A07M4G, 25.12.6, survives `ifdown/ifup` and a
+cold boot):
+
+```
+network.wan.apn      'internet'     official DIGI APN (NOS/WOO: 'umts')
+network.wan.mtu      '1400'         = PDP MTU; wwan0 comes up at 1400
+network.wan.auto     '1'            netifd brings LTE up at boot (watchdog is the backup)
+firewall zone wan    mtu_fix 1      MSS = route MTU - 40 = 1360, both directions
+firewall zone loja   mtu_fix 0      not needed: clamping happens on the wan zone
+/etc/firewall.user   removed        the manual maxseg 1360 rules duplicated mtu_fix
+```
+
+Effect, same place, same SIM (router-local, Cloudflare):
+
+```
+                 before (apn '', mtu 1500, mtu_fix 0)   after
+download         84-91 Mbps                             83-92 Mbps
+upload           7.8 Mbps                               15-19 Mbps
+ping             43 ms avg, 158 ms max                  36 ms avg
+```
+
+> An earlier version of this repo said "never set an MTU on the modem — it hangs the
+> Quectel". That did not reproduce on this firmware: `mtu 1400` is fine. If a different
+> modem firmware does hang, fall back to `mtu_fix 1` alone (MSS clamping without the MTU).
 
 ## Watchdog (this box, not the Orbi one)
 
 `scripts/wan-up.sh`, called every minute by cron and once from a net hotplug when `wwan0`
-appears. Locked with `/tmp/wan-up.lock`, logs state transitions to `/root/wan.log`.
+appears. Locked with `/tmp/wan-up.lock`, logs state transitions to `/root/wan.log`. It does
+nothing during the first 150 s of uptime: with `auto 1`, netifd is still bringing QMI up
+then, and a `killall uqmi` in the middle of that is pitfall 2 below (seen once on a cold
+boot before the guard: "rede em baixo" → "recuperado: ifup" 26 s later).
 
 ```
 ping -I wwan0 1.1.1.1 ok?               -> exit
@@ -176,33 +209,52 @@ No GPIO poking, no `modem_switch` — those are Netgear LBR20 mechanisms and do 
 here. The stock LTE3301 modem power GPIO (`power_modem`) is raised once by `/etc/rc.local`
 because OpenWrt leaves it at 0 at boot; without that the modem never enumerates.
 
-Measured: a deliberate `ifdown wan` recovered in ~70 s; a cold boot reaches LTE with an IPv4
-address in **104 s**, unattended.
+Measured: a deliberate `ifdown wan` recovered in ~70 s; a cold boot reaches SSH in 61 s and
+LTE with an IPv4 address in **97 s**, unattended.
 
 ## Measurements
 
-Throughput through the router (NAT, LTE, 50 MB from a client):
+DIGI, after the APN/MTU fix (2026-11-05):
 
 ```
-download   62-67 Mbps        CPU 6% of 4 threads     (MT7621 is not the bottleneck)
-ping       32.7 ms avg, 1.5 ms spread (DIGI)
+signal     RSRP -88..-91 dBm, RSRQ -9..-14, SINR 16-23 dB
+carriers   B3 10 MHz (PCC) + B7 10 MHz (SCC), CA active
+download   83-92 Mbps   router-local, 1 or 4 streams; 82.5-92.1 from a 5 GHz phone
+upload     15-19 Mbps
+ping       ~36 ms
+CPU        91% idle during the download (MT7621 is not the bottleneck)
 ```
 
-Same box, same place, two operators:
+Same box, same place, two operators (2026-11-04, *before* the APN/MTU fix):
 
 | | DIGI (268-02) | WOO/NOS (268-03) |
 |---|---|---|
 | carriers | B7 10 MHz + B3 10 MHz | B7 **20 MHz** + B3 **20 MHz** |
 | CA | **activated** | "deactivated" (single carrier) |
-| down | **62-67 Mbps**, stable | 11-48 Mbps, erratic |
-| up | 8-13 Mbps | **16.5 Mbps** |
+| down | **62-67 Mbps**, stable (83-92 after the fix) | 11-48 Mbps, erratic |
+| up | 8-13 Mbps (15-19 after the fix) | **16.5 Mbps** |
 | ping | 28-45 ms | 21-**152** ms (jitter) |
-| APN | empty (assigned by SIM) | `umts` — the SIM does not provide it |
+| APN | empty worked; `internet` is the official one | `umts` — the SIM does not provide it |
 | PDP MTU | 1400 | 1456 |
 
-DIGI wins here for a store: audio-to-speakers is downlink and jitter-sensitive. Note the
-modem is Cat 6 (2 carriers max) and the local network only offers those two carriers, so
-~90-100 Mbps is the hardware ceiling — a 5G CPE is not "config work", it is different radio.
+DIGI wins here for a store: audio-to-speakers is downlink and jitter-sensitive. The modem is
+Cat 6 (2 DL carriers max, 1 UL carrier) and the local cell offers B3 + B7 at 10 MHz each:
+≈150 Mbps PHY peak down (2x2, 64QAM) and ≈50 up; 83-92 / 15-19 of real TCP on a shared cell
+is the practical ceiling. More needs wider carriers from the operator or a 5G CPE — radio,
+not configuration. Band locking does not help: the neighbour cells are weaker.
+
+## Tuning and cleanup (2026-11-05)
+
+- **IRQ affinity.** Every IRQ (ethernet, USB/xhci = the modem, mt7615e) was on CPU0.
+  `scripts/irq-spread.sh` (run from `rc.local`) pins ethernet → CPU0, xhci → CPU1,
+  Wi-Fi → CPU2. No change in LTE numbers (the radio is the limit); it keeps CPU0 free when
+  LTE and Wi-Fi are both busy. `packet_steering 1` (RPS) stays on.
+- **Removed:** wan→lan `Allow-IPSec-ESP`, `Allow-ISAKMP`, `Allow-IGMP` (CGNAT, unused);
+  `dhcp.lan` DHCPv6/RA server options (odhcpd is not installed, IPv6 is off); the
+  `firewall.user` include.
+- **Kept on purpose:** the watchdog cron, the `power_modem` line in `rc.local` (the GPIO
+  exists and is needed), `wpa_supplicant` (comes with `wpad`, ~3 MB, not worth the risk).
+  RAM in use: ~44 of 248 MB.
 
 ## Pitfalls that cost real time
 
@@ -223,10 +275,13 @@ modem is Cat 6 (2 carriers max) and the local network only offers those two carr
 5. **There is no `opkg`** in 25.12 — it is `apk`. `uqmi` *is* already in the image.
 6. **`timeout` does not exist** in busybox here; wrap long commands with a background
    process plus `kill` (or you lose the SSH session to a hung `uqmi`).
-7. **Outbound HTTP from the router returns EPERM** on this build; transfer files over SSH.
-8. **Operator APN must be set per SIM** (the OpenWrt QMI profile has an empty APN and
-   expects the network to supply it). DIGI does, NOS/WOO does not: `apn='umts'`.
-9. **The web UI is AES+RSA encrypted**, and its `cgi-exec` allows only a short list of
+7. **Outbound HTTP from the initramfs returned EPERM**; transfer files over SSH while
+   flashing. The installed system downloads normally (`wget`/`uclient-fetch`).
+8. **Set the operator APN explicitly** (the OpenWrt QMI profile has an empty APN). DIGI
+   happens to work with `''`, but use the official `internet`; NOS/WOO needs `umts`.
+9. **`bss_transition` / `wnm_sleep_mode` take both radios down** with `wpad-basic-mbedtls`
+   ("unknown configuration item"); `wifi reload` does not recover until they are removed.
+10. **The web UI is AES+RSA encrypted**, and its `cgi-exec` allows only a short list of
    commands (ACL); `ubus` over HTTP logs in fine but denies `uci`/`rc`/`system` actions for
    that session. Plan on SSH, not on LuCI automation.
 
@@ -240,8 +295,10 @@ config/rc.local-e-cron.txt   rc.local, crontab, sysupgrade.conf
 scripts/wan-up.sh            LTE watchdog
 scripts/30-wwan-ifup         hotplug: modem appeared
 scripts/41-ap-isolate        hotplug: bridge port isolation for the AP ports
-scripts/firewall.user        MSS 1360 clamp (fw4 include)
+scripts/irq-spread.sh        IRQ affinity (ethernet/modem/Wi-Fi on separate CPUs)
+scripts/wifi-log.sh          per-client band/signal/bitrate log (cron, /tmp)
 scripts/install-router.sh    push all of the above and apply uci + cron, idempotent
+                             (WIFI_KEY=... APN=internet PDP_MTU=1400 ./install-router.sh)
 firmware/sha256sums          image hashes (binaries are git-ignored)
 ```
 

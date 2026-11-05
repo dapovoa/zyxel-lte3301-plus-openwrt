@@ -1,21 +1,18 @@
 ##### /etc/rc.local
-# Put your custom commands here that should be executed once
-# the system init finished. By default this file does nothing.
 
-# alimentacao do modem LTE (GPIO 27 vem a 0)
 echo 1 > /sys/class/gpio/power_modem/value 2>/dev/null
+/usr/bin/irq-spread.sh
 exit 0
 
 ##### /etc/crontabs/root (crontab -l)
 * * * * * /usr/bin/wan-up.sh
+* * * * * /usr/bin/wifi-log.sh
 
 ##### /etc/sysupgrade.conf
-## This file contains files and directories that should
-## be preserved during an upgrade.
 
-# /etc/example.conf
-# /etc/openvpn/
 /usr/bin/wan-up.sh
 /etc/hotplug.d/net/
-/etc/firewall.user
 /etc/crontabs/root
+/usr/bin/irq-spread.sh
+/usr/bin/wifi-log.sh
+/etc/rc.local
