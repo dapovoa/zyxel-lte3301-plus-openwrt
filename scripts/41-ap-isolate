@@ -1,0 +1,3 @@
+for p in /sys/class/net/phy*-ap*; do
+	[ -e "$p/brport/isolated" ] && echo 1 > "$p/brport/isolated" 2>/dev/null
+done

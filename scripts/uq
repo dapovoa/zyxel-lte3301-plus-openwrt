@@ -1,0 +1,5 @@
+#!/bin/sh
+out=/tmp/uq.$$; rm -f "$out"
+( uqmi "$@" > "$out" 2>&1 ) & p=$!
+i=0; while kill -0 $p 2>/dev/null && [ $i -lt 12 ]; do sleep 1; i=$((i+1)); done
+kill -9 $p 2>/dev/null; cat "$out"; rm -f "$out"

@@ -1,0 +1,2 @@
+nft add rule inet fw4 mangle_postrouting oifname "wwan0" meta nfproto ipv4 tcp flags syn tcp option maxseg size set 1360
+nft add rule inet fw4 mangle_forward iifname "wwan0" meta nfproto ipv4 tcp flags syn tcp option maxseg size set 1360
